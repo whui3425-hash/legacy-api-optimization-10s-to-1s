@@ -1,39 +1,57 @@
-# Case Study: Solving 10s Latency in Data-Intensive Property Management Systems
 
-**🚀 Performance Leap: 9.95s ➔ < 1.0s (90% Reduction in P99 Latency)**
 
-## 1. Executive Summary
-As a Lead Java Developer handling a large-scale **SaaS Property Management System (PMS)**, I encountered a critical performance bottleneck. A core API responsible for querying property staff evaluation tasks was suffering from **near 10-second timeouts** during peak hours. This caused cascading UI failures and DB connection pool exhaustion.
+# Case Study: Resolving Extreme Data-Permission Bottlenecks via Targeted Degradation in SaaS Property Management
 
-This repository documents the pragmatic approach I took to diagnose, refactor, and stabilize this distributed system without introducing heavy, over-engineered frameworks.
+**🚀 Performance Impact: Edge Cases dropped from 16.4s ➔ 2.4s | Admin Queries ➔ 444ms (Millisecond-level)**
 
-## 2. The Bottleneck: "Data Fan-out" & Legacy Permissions
-The legacy system relied on a flawed, property-based data permission model. In a large property management context, the data retrieval flow was:
-`Manager -> Property/Compound IDs (Hundreds) -> Staff IDs (Thousands) -> Evaluation Tasks (Massive)`
+## 1. The Challenge: Dynamic Permission Fan-out
+In a large-scale SaaS Property Management System, transitioning to a "user-centric dynamic permission model" required the system to fetch massive arrays of Employee IDs before querying evaluation records.
 
-This extreme "Fan-out" effect caused massive `IN` clause database queries and blocked Feign client cross-service calls, pushing the P99 latency to 9.95 seconds.
+This architectural shift caused the core API latency to spike to a catastrophic **16.4 seconds** during peak hours, severely threatening the stability of the entire Kubernetes cluster.
 
-### Evidence: Real-time Chaos
-Below is the Grafana dashboard capturing the system's instability, with Max latency hitting **9.95s**:
-![Grafana P99 Spikes](./images/grafana-p99-spikes.png)
-![Grafana API List](./images/grafana-api-list.png)
+## 2. Diagnosis: Pinpointing the Twin Bottlenecks
+Lacking heavy APM tools, I utilized Alibaba Cloud Log Service (SLS) and MyBatis interceptors to reconstruct the trace:
 
-## 3. Diagnosis: Tracing Without Heavy APM
-In an environment lacking heavy APM tools like SkyWalking, I engineered a lightweight distributed tracing solution using **TraceId** and Alibaba Cloud Log Service (SLS).
+**Bottleneck 1: Network I/O Bloat & RPC Delays**
+SLS logs captured a total request time of **16,459ms**. Drilling down into the Feign clients revealed that transferring massive, unoptimized entity objects across microservices was causing severe I/O blocking (`listServiceOrg` took **3,694ms**; `findEmpByParam` took **2,593ms**).
+![16.4s Total Latency](./images/1-6.jpg)
+![Feign Delay 1](./images/1-4.jpg)
+![Feign Delay 2](./images/1-5.jpg)
 
-By tracking the TraceId across microservices, I pinpointed that the vast majority of the latency was consumed by redundant cross-property staff data aggregation and unindexed database scans.
-![SLS Trace Log](./images/sls-trace-log.png)
+**Bottleneck 2: The 110k Data Explosion & The `COUNT` Trap**
+Database interceptors exposed the most fatal flaw: Certain regional accounts were querying permission scopes encompassing an astonishing **111,993 employees**. This massive data fan-out caused MySQL indexes to fail entirely, with a single underlying `COUNT` query consuming **9,573ms**.
+![110k Employee Fanout](./images/1-11.jpg)
+![9.5s Slow SQL](./images/1-3.jpg)
 
-## 4. The Pragmatic Solution: Restructuring Data Flow
-Instead of blindly scaling hardware or adding complex cache layers, I tackled the root architectural flaw:
-1. **Permission Flattening (Database Level):** Refactored the data scope. Instead of recursively traversing property nodes, I introduced a dual-permission check (`Ownership Property` + `Assigned Property`), drastically reducing the SQL result set.
-2. **Small Result Set Driving Large Sets:** Rewrote the massive `JOIN` and `IN` queries into targeted, index-hit queries based on the flattened permission model.
-3. **Targeted Process Locks (Memory Protection):** For edge cases where a regional manager queried over 1,000 staff members simultaneously, I implemented a targeted memory pagination lock (`Targeted Resource Isolation`). This prevented Pod OOM (Out of Memory) crashes without blocking standard user traffic.
+## 3. Data-Driven Architectural Decision
+Instead of over-engineering a global caching solution, I queried the production database to analyze the actual blast radius:
+1. **The Majority:** Global Admins (who bypass permission filters) were being unfairly bottlenecked by shared database congestion.
+2. **The Edge Cases:** There were **exactly 26 non-admin accounts** in the entire system that hit the ">1000 employees" extreme threshold.
 
-## 5. Quantitative Results & ROI
-* **P99 Latency:** Dropped from extreme spikes (**9.95s**) to a stable **< 1.0s** (averaging around 500ms).
-* **System Stability:** Eliminated Pod restarts caused by memory leaks during large dataset pagination.
-* **Business Value:** Restored user trust for regional managers and drastically reduced cloud database CPU consumption, providing a high ROI solution with minimal code disruption.
+## 4. The Pragmatic Solution: Targeted Memory Pagination & Bulkhead Isolation
+Based on the data, I implemented a highly targeted, cost-effective degradation strategy:
+1. **Admin Fast-Track:** Bypassed the heavy permission logic entirely for administrators, pushing pagination directly down to the DB layer to utilize native indexes.
+2. **Targeted Degradation for the 26 Edge-Case Accounts:**
+   * **Killing the Slow SQL:** Abandoned database `IN` and `COUNT` queries for these 26 users. Shifted to a chunk-based **Memory Intersection Pagination** approach.
+   * **OOM Safeguard (Process Lock):** To prevent these massive 110k-user queries from causing JVM Out-of-Memory (OOM) errors and crashing the Pods, I implemented a strict **Concurrency Process Lock**. The system gracefully limits concurrent heavy queries, acting as a bulkhead to protect the cluster.
 
----
-*Looking for an expert to rescue your legacy Java systems or resolve deep-level performance bottlenecks? Let's connect on Upwork.*
+## 5. Production Results & Full-Stack Verification
+Post-deployment, the system exhibited a night-and-day transformation:
+
+**For Admins (The Majority): Blistering Speed**
+* Frontend UX: Chrome DevTools Network captures the API returning in **444ms**.
+* Backend & SQL: Total processing time crushed down to **471ms**, and the complex permission COUNT query executes in a mere **95ms**.
+  ![Frontend 444ms](./images/1-8.jpg)
+  ![Backend 471ms](./images/1-7.jpg)
+  ![Optimized SQL 95ms](./images/1-9.jpg)
+
+**For the 26 Edge Cases (Boundary Defense): Safe Degradation**
+* The fatal 16.4s queries were forcefully compressed. Frontend response is now a stable **2.44s**, with backend logs confirming execution in **2,363ms** (SQL portion reduced to 530ms). Pod OOM restarts were completely eradicated.
+  ![Edge Frontend 2.44s](./images/1-13.jpg)
+  ![Edge Backend 2.3s](./images/1-10.jpg)
+  ![Edge SQL 530ms](./images/1-12.jpg)
+
+## 6. Core Architectural Code
+Below are sanitized snippets demonstrating the Adaptive Routing and Concurrency Circuit-Breaker implemented to isolate these massive queries:
+![Adaptive Routing Strategy](./images/1-14.jpg)
+![Memory Pagination & Circuit Breaker](./images/1-15.jpg)
