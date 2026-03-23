@@ -23,6 +23,7 @@ Database interceptors exposed the most fatal flaw: Certain regional accounts wer
 ![110k Employee Fanout](./images/1-11.jpg)
 ![9.5s Slow SQL](./images/1-3.jpg)
 
+
 ## 3. Data-Driven Architectural Decision
 Instead of over-engineering a global caching solution, I queried the production database to analyze the actual blast radius:
 1. **The Majority:** Global Admins (who bypass permission filters) were being unfairly bottlenecked by shared database congestion.
